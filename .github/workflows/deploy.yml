@@ -1,0 +1,63 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Ansible
+        run: sudo apt update && sudo apt install -y ansible
+
+      - name: Add SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 40.82.207.123 >> ~/.ssh/known_hosts
+
+      - name: Build Docker Image
+        run: docker build --no-cache -t my-web-app .
+
+      - name: Save Docker Image
+        run: docker save -o my-nginx.tar my-web-app
+
+      - name: Copy Docker Image to VM
+        run: scp -i ~/.ssh/id_rsa my-nginx.tar azureuser@40.82.207.123:/home/azureuser
+
+      - name: Add azureuser to Docker group
+        run: |
+          ssh -i ~/.ssh/id_rsa -t azureuser@40.82.207.123 << 'EOF'
+            sudo usermod -aG docker azureuser
+            newgrp docker
+          EOF
+
+      - name: Stop and Remove Existing Docker Container (if using port 80)
+        run: |
+          ssh -i ~/.ssh/id_rsa -t azureuser@40.82.207.123 << 'EOF'
+            # Check if any container is using port 80 and stop/remove it
+            CONTAINER_ID=$(docker ps -q -f "publish=80")
+            if [ -n "$CONTAINER_ID" ]; then
+              docker stop $CONTAINER_ID
+              docker rm $CONTAINER_ID
+            fi
+          EOF
+
+      - name: Load Docker Image on VM
+        run: |
+          ssh -i ~/.ssh/id_rsa -t azureuser@40.82.207.123 << 'EOF'
+            docker load -i /home/azureuser/my-nginx.tar
+          EOF
+
+      - name: Run Docker Container
+        run: |
+          ssh -i ~/.ssh/id_rsa -t azureuser@40.82.207.123 << 'EOF'
+            sudo docker run -d -p 80:80 --name my-web-app my-web-app
+          EOF
